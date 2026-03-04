@@ -233,6 +233,18 @@
     }
     .btn-sm:hover { border-color: var(--text); color: var(--text); }
 
+    .session-timer {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      font-size: 10px;
+      color: var(--dim);
+      letter-spacing: 1px;
+      font-family: var(--mono);
+    }
+    .session-timer.warn { border-color: var(--danger); color: var(--danger); }
+    .session-timer.warn #session-countdown { animation: pulse 1s infinite; }
+
     /* ── MAIN LAYOUT ── */
     .main {
       display: flex;
@@ -581,6 +593,9 @@
     </div>
     <div class="topbar-spacer"></div>
     <div class="topbar-user">Signed in as <strong id="topbar-user-label">—</strong></div>
+    <div class="session-timer" id="session-timer" title="Session time remaining">
+      <span id="session-countdown">--:--</span>
+    </div>
     <button class="btn-sm" onclick="doLogout()">Sign out</button>
   </div>
 
@@ -678,95 +693,134 @@
 
 <script>
 // ── State ──────────────────────────────────────────────
-let AUTH_HEADER = '';
 let API_BASE    = '';
+let AUTH_TOKEN  = '';       // JWT Bearer token (in-memory only, never persisted)
+let TOKEN_EXP   = 0;        // Unix ms timestamp of expiry
 let USERNAME    = '';
 let currentPath = '';
 let pendingDeletePath = '';
+let sessionInterval = null;
 
-// auth.ts decodes with atob() which is Latin-1.
-// We must match that exactly — do NOT UTF-8 encode first.
-// Reject non-Latin-1 chars early with a clear message instead.
-function utfBase64(str) {
+// ── Auth helpers ───────────────────────────────────────
+// auth.ts uses atob() (Latin-1). Match exactly — reject non-Latin-1 early.
+function assertLatin1(str) {
   for (let i = 0; i < str.length; i++) {
     if (str.charCodeAt(i) > 255) {
       throw new Error('Username and password must contain only standard (Latin-1) characters.');
     }
   }
-  return btoa(str);
 }
 
-// ── Auth ───────────────────────────────────────────────
+function bearerHeader() {
+  return { Authorization: `Bearer ${AUTH_TOKEN}` };
+}
+
+// ── apiFetch — attaches Bearer token, handles 401 globally ────────────────
+async function apiFetch(path, options = {}) {
+  const res = await fetch(API_BASE + path, {
+    ...options,
+    headers: {
+      ...bearerHeader(),
+      ...(options.headers || {}),
+    },
+  });
+  // Any 401 after login = token expired or revoked → force re-login
+  if (res.status === 401 && path !== '/auth/login') {
+    clearSession();
+    showApp(false);
+    showLoginError('Your session expired. Please sign in again.');
+    return res; // caller should bail
+  }
+  return res;
+}
+
+// ── Login ──────────────────────────────────────────────
 async function doLogin() {
-  const user = document.getElementById('login-user').value.trim();
-  const pass = document.getElementById('login-pass').value;
+  const user  = document.getElementById('login-user').value.trim();
+  const pass  = document.getElementById('login-pass').value;
   const proto = document.getElementById('login-proto').value;
   const host  = document.getElementById('login-url').value.trim().replace(/\/+$/, '');
 
-  if (!user || !pass || !host) {
-    showLoginError('Please fill in all fields.');
-    return;
-  }
+  if (!user || !pass || !host) { showLoginError('Please fill in all fields.'); return; }
 
-  API_BASE    = `${proto}${host}`;
-  AUTH_HEADER = 'Basic ' + utfBase64(`${user}:${pass}`);
-  USERNAME    = user;
+  try { assertLatin1(user); assertLatin1(pass); }
+  catch (e) { showLoginError(e.message); return; }
+
+  API_BASE = `${proto}${host}`;
 
   const btn = document.getElementById('login-btn');
-  btn.disabled = true;
-  btn.textContent = 'Connecting…';
+  btn.disabled = true; btn.textContent = 'Connecting…';
 
   try {
-    const res = await apiFetch("/protected");
-    if (res.ok) {
-      // Server returns { message: "Welcome, <username>! ..." }
-      // Parse and extract the verified username from the response rather than
-      // trusting the raw form input, to confirm the server accepted the identity.
-      let verifiedUser = user;
-      try {
-        const body = await res.json();
-        const match = body.message && body.message.match(/^Welcome, (.+)! This route/);
-        if (match) verifiedUser = match[1];
-      } catch { /* fall back to form input */ }
-      USERNAME = verifiedUser;
-      document.getElementById("login-screen").style.display = "none";
-      document.getElementById("app").style.display = "flex";
-      document.getElementById("topbar-user-label").textContent = verifiedUser;
-      checkHealth();
-      loadFiles("");
-    } else if (res.status === 401) {
-      showLoginError("Wrong username or password.");
-      AUTH_HEADER = "";
-    } else {
-      showLoginError("Server returned " + res.status + ". Check the API URL.");
-      AUTH_HEADER = "";
+    const res = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: user, password: pass }),
+    });
+
+    if (res.status === 429) {
+      showLoginError('Too many login attempts. Please wait a minute and try again.');
+      return;
     }
+    if (res.status === 401) {
+      showLoginError('Wrong username or password.');
+      return;
+    }
+    if (!res.ok) {
+      showLoginError(`Server returned ${res.status}. Check the API URL.`);
+      return;
+    }
+
+    const data = await res.json();
+    // Store token in memory only — never in localStorage/sessionStorage
+    AUTH_TOKEN = data.token;
+    TOKEN_EXP  = new Date(data.expiresAt).getTime();
+    USERNAME   = data.user;
+
+    showApp(true);
+    startSessionTimer(data.ttl);
+    checkHealth();
+    loadFiles('');
+
   } catch (e) {
-    const msg = e instanceof TypeError
-      ? "Network error u2014 could not reach " + API_BASE + ".\n\nPossible fixes:\nu2022 Confirm the API server is running: curl " + API_BASE + "/\nu2022 Open this HTML as file:// instead of via a local server\nu2022 Or serve this file from the same port as the API"
-      : "Error: " + e.message;
-    showLoginError(msg);
-    AUTH_HEADER = "";
+    const isNetwork = e instanceof TypeError;
+    showLoginError(
+      isNetwork
+        ? `Network error — could not reach ${API_BASE}.
+
+• Confirm the server is running
+• Open this file via file:// or serve from the same origin`
+        : `Error: ${e.message}`
+    );
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Connect →';
+    btn.disabled = false; btn.textContent = 'Connect →';
   }
 }
 
 function doLogout() {
-  AUTH_HEADER = '';
-  API_BASE    = '';
+  clearSession();
+  showApp(false);
+  document.getElementById('login-pass').value = '';
+}
+
+function clearSession() {
+  AUTH_TOKEN  = '';
+  TOKEN_EXP   = 0;
   USERNAME    = '';
   currentPath = '';
-  document.getElementById('app').style.display = 'none';
-  document.getElementById('login-screen').style.display = 'flex';
-  document.getElementById('login-pass').value = '';
+  if (sessionInterval) { clearInterval(sessionInterval); sessionInterval = null; }
+}
+
+function showApp(visible) {
+  document.getElementById('login-screen').style.display = visible ? 'none' : 'flex';
+  document.getElementById('app').style.display          = visible ? 'flex' : 'none';
+  if (visible) document.getElementById('topbar-user-label').textContent = USERNAME;
 }
 
 function showLoginError(msg) {
   const el = document.getElementById('login-error');
   el.style.display = 'block';
-  el.textContent = msg;
+  el.textContent   = msg;
 }
 
 // Enter key on login
@@ -776,15 +830,34 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ── API Helper ─────────────────────────────────────────
-async function apiFetch(path, options = {}) {
-  return fetch(API_BASE + path, {
-    ...options,
-    headers: {
-      Authorization: AUTH_HEADER,
-      ...(options.headers || {}),
-    },
-  });
+// ── Session countdown ──────────────────────────────────
+function startSessionTimer(ttlSeconds) {
+  const timerEl    = document.getElementById('session-timer');
+  const countdownEl = document.getElementById('session-countdown');
+  const WARN_SECS  = 120; // warn when < 2 min left
+
+  function tick() {
+    const secsLeft = Math.max(0, Math.floor((TOKEN_EXP - Date.now()) / 1000));
+    const mm = String(Math.floor(secsLeft / 60)).padStart(2, '0');
+    const ss = String(secsLeft % 60).padStart(2, '0');
+    countdownEl.textContent = `${mm}:${ss}`;
+
+    if (secsLeft <= WARN_SECS) {
+      timerEl.classList.add('warn');
+    } else {
+      timerEl.classList.remove('warn');
+    }
+
+    if (secsLeft === 0) {
+      clearInterval(sessionInterval);
+      sessionInterval = null;
+      toast('Session expired — please sign in again.', 'error');
+      setTimeout(() => { clearSession(); showApp(false); }, 1500);
+    }
+  }
+
+  tick();
+  sessionInterval = setInterval(tick, 1000);
 }
 
 // ── Health ─────────────────────────────────────────────
@@ -797,14 +870,14 @@ async function checkHealth() {
     const res  = await apiFetch('/health');
     const data = await res.json();
     if (data.status === 'healthy') {
-      dot.className   = 'health-dot ok';
+      dot.className = 'health-dot ok';
       label.textContent = 'GitHub Connected';
     } else {
-      dot.className   = 'health-dot fail';
+      dot.className = 'health-dot fail';
       label.textContent = 'GitHub Error';
     }
   } catch {
-    dot.className   = 'health-dot fail';
+    dot.className = 'health-dot fail';
     label.textContent = 'Unreachable';
   }
 }
@@ -827,72 +900,56 @@ async function loadFiles(path) {
 
   try {
     const res = await apiFetch(`/repo/list/${path}`);
+    if (res.status === 401) return; // handled globally
     if (!res.ok) {
       let detail = `HTTP ${res.status}`;
-      try {
-        const errBody = await res.json();
-        detail = errBody.error || errBody.message || JSON.stringify(errBody);
-      } catch { /* response wasn't JSON */ }
+      try { const e = await res.json(); detail = e.error || e.message || JSON.stringify(e); } catch {}
       throw new Error(detail);
     }
-    const data = await res.json();
-    renderFileList(data);
+    renderFileList(await res.json());
   } catch (e) {
     body.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-msg" style="color:var(--danger);margin-bottom:8px">Server error</div><div class="empty-msg" style="font-size:11px;word-break:break-all;max-width:480px;margin:0 auto">${e.message}</div></div>`;
   }
 }
 
 function renderBreadcrumb(path) {
-  const bc = document.getElementById('breadcrumb');
+  const bc    = document.getElementById('breadcrumb');
   const parts = path ? path.split('/').filter(Boolean) : [];
-  let html = `<span class="breadcrumb-item" onclick="loadFiles('')">root</span>`;
-  let built = '';
+  let html    = `<span class="breadcrumb-item" onclick="loadFiles('')">root</span>`;
+  let built   = '';
   parts.forEach((p, i) => {
     built += (i === 0 ? '' : '/') + p;
     const captured = built;
     html += `<span class="breadcrumb-sep">/</span>`;
-    if (i === parts.length - 1) {
-      html += `<span class="breadcrumb-item current">${p}</span>`;
-    } else {
-      html += `<span class="breadcrumb-item" onclick="loadFiles('${captured}')">${p}</span>`;
-    }
+    html += i === parts.length - 1
+      ? `<span class="breadcrumb-item current">${p}</span>`
+      : `<span class="breadcrumb-item" onclick="loadFiles('${captured}')">${p}</span>`;
   });
   bc.innerHTML = html;
 }
 
 function renderFileList(items) {
   const body = document.getElementById('file-list-body');
-
   if (!items || items.length === 0) {
     body.innerHTML = `<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-msg">This directory is empty</div></div>`;
     return;
   }
-
-  // Sort: dirs first
-  const dirs  = items.filter(f => f.type === 'dir');
-  const files = items.filter(f => f.type !== 'dir');
-  const sorted = [...dirs, ...files];
-
+  const sorted = [
+    ...items.filter(f => f.type === 'dir'),
+    ...items.filter(f => f.type !== 'dir'),
+  ];
   body.innerHTML = sorted.map(item => {
     const isDir     = item.type === 'dir';
     const icon      = isDir ? '📁' : fileIcon(item.name);
     const typeLabel = isDir ? 'Directory' : (item.name.split('.').pop()?.toUpperCase() || 'File');
-
-    // item.path from GitHub already contains GITHUB_ROOT_DIR as a prefix.
-    // Passing it back to the API would cause getFullPath() to double-prefix it
-    // (e.g. "data/reports" becomes "data/data/reports") -> 404 -> 500.
-    // Build the API path from currentPath + item.name so it stays relative.
-    const apiPath = currentPath ? `${currentPath}/${item.name}` : item.name;
-
-    const actions = isDir
-      ? `<div class="file-actions">
-           <div class="icon-btn" title="Open" onclick="event.stopPropagation();loadFiles('${apiPath}')">→</div>
-         </div>`
+    // Build relative API path from currentPath + name to avoid GITHUB_ROOT_DIR double-prefix
+    const apiPath   = currentPath ? `${currentPath}/${item.name}` : item.name;
+    const actions   = isDir
+      ? `<div class="file-actions"><div class="icon-btn" title="Open" onclick="event.stopPropagation();loadFiles('${apiPath}')">→</div></div>`
       : `<div class="file-actions">
            <div class="icon-btn" title="Download" onclick="event.stopPropagation();doDownload('${apiPath}','${item.name}')">⬇</div>
            <div class="icon-btn danger" title="Delete" onclick="event.stopPropagation();openDeleteModal('${apiPath}')">✕</div>
          </div>`;
-
     return `
       <div class="file-row" onclick="${isDir ? `loadFiles('${apiPath}')` : ''}">
         <div class="file-name"><span class="file-icon">${icon}</span><span>${item.name}</span></div>
@@ -910,8 +967,7 @@ function fileIcon(name) {
     png:'🖼', jpg:'🖼', jpeg:'🖼', gif:'🖼', svg:'🖼', webp:'🖼',
     pdf:'📄', zip:'📦', tar:'📦', gz:'📦',
     sh:'⚙️', yaml:'⚙️', yml:'⚙️', toml:'⚙️',
-    html:'🌐', css:'🎨',
-    mp4:'🎬', mp3:'🎵',
+    html:'🌐', css:'🎨', mp4:'🎬', mp3:'🎵',
   };
   return map[ext] || '📄';
 }
@@ -923,17 +979,15 @@ async function doDownload(path, filename) {
   toast(`Downloading ${filename}…`);
   try {
     const res = await apiFetch(`/repo/download/${path}`);
+    if (res.status === 401) return;
     if (!res.ok) throw new Error('Download failed');
     const blob = await res.blob();
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    a.href = url; a.download = filename;
-    a.click();
+    a.href = url; a.download = filename; a.click();
     URL.revokeObjectURL(url);
     toast(`${filename} downloaded`, 'success');
-  } catch (e) {
-    toast(e.message, 'error');
-  }
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 // ── Delete ─────────────────────────────────────────────
@@ -955,12 +1009,11 @@ async function confirmDelete() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: `Delete ${path} via RepoVault` }),
     });
+    if (res.status === 401) return;
     if (!res.ok) throw new Error('Delete failed');
     toast(`Deleted ${path}`, 'success');
     loadFiles(currentPath);
-  } catch (e) {
-    toast(e.message, 'error');
-  }
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 // ── Upload ─────────────────────────────────────────────
@@ -971,22 +1024,16 @@ function onFileSelected(input) {
   const label = document.getElementById('file-selected-name');
   if (selectedFile) {
     label.textContent = `✓ ${selectedFile.name} (${formatBytes(selectedFile.size)})`;
-    // Auto-fill path if empty
     const pathInput = document.getElementById('upload-path');
     if (!pathInput.value) {
-      pathInput.value = currentPath
-        ? `${currentPath}/${selectedFile.name}`
-        : selectedFile.name;
+      pathInput.value = currentPath ? `${currentPath}/${selectedFile.name}` : selectedFile.name;
     }
-  } else {
-    label.textContent = '';
-  }
+  } else { label.textContent = ''; }
 }
 
 async function doUpload() {
   const destPath = document.getElementById('upload-path').value.trim();
   const msg      = document.getElementById('upload-msg').value.trim();
-
   if (!selectedFile) { toast('Please select a file', 'error'); return; }
   if (!destPath)     { toast('Please enter a destination path', 'error'); return; }
 
@@ -998,16 +1045,13 @@ async function doUpload() {
     fd.append('file', selectedFile);
     if (msg) fd.append('message', msg);
 
-    const res = await apiFetch(`/repo/upload/${destPath}`, {
-      method: 'POST',
-      body: fd,
-    });
+    const res = await apiFetch(`/repo/upload/${destPath}`, { method: 'POST', body: fd });
+    if (res.status === 401) return;
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Upload failed');
     }
     toast(`${selectedFile.name} uploaded successfully`, 'success');
-    // Reset
     selectedFile = null;
     document.getElementById('file-input').value = '';
     document.getElementById('file-selected-name').textContent = '';
@@ -1015,28 +1059,22 @@ async function doUpload() {
     document.getElementById('upload-msg').value = '';
     switchPanel('browse');
     loadFiles(currentPath);
-  } catch (e) {
-    toast(e.message, 'error');
-  } finally {
-    btn.disabled = false; btn.textContent = 'Upload File';
-  }
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; btn.textContent = 'Upload File'; }
 }
 
 // Drag-and-drop
 const zone = document.getElementById('upload-zone');
 zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragging'); });
-zone.addEventListener('dragleave', ()  => zone.classList.remove('dragging'));
+zone.addEventListener('dragleave', () => zone.classList.remove('dragging'));
 zone.addEventListener('drop', e => {
   e.preventDefault(); zone.classList.remove('dragging');
   const f = e.dataTransfer.files[0];
   if (f) {
     selectedFile = f;
-    const label = document.getElementById('file-selected-name');
-    label.textContent = `✓ ${f.name} (${formatBytes(f.size)})`;
+    document.getElementById('file-selected-name').textContent = `✓ ${f.name} (${formatBytes(f.size)})`;
     const pathInput = document.getElementById('upload-path');
-    if (!pathInput.value) {
-      pathInput.value = currentPath ? `${currentPath}/${f.name}` : f.name;
-    }
+    if (!pathInput.value) pathInput.value = currentPath ? `${currentPath}/${f.name}` : f.name;
   }
 });
 
@@ -1044,8 +1082,7 @@ zone.addEventListener('drop', e => {
 function toast(msg, type = 'info') {
   const c = document.getElementById('toast-container');
   const t = document.createElement('div');
-  t.className = `toast ${type}`;
-  t.textContent = msg;
+  t.className = `toast ${type}`; t.textContent = msg;
   c.appendChild(t);
   setTimeout(() => t.remove(), 3100);
 }
@@ -1053,8 +1090,8 @@ function toast(msg, type = 'info') {
 // ── Helpers ────────────────────────────────────────────
 function formatBytes(b) {
   if (b < 1024) return b + ' B';
-  if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
-  return (b/1024/1024).toFixed(1) + ' MB';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
 }
 </script>
 </body>
