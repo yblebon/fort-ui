@@ -553,7 +553,10 @@
     <div class="field">
       <label>API Base URL</label>
       <div class="api-field">
-        <div class="api-prefix">https://</div>
+        <select id="login-proto" style="padding:10px 10px;background:var(--muted);color:var(--text);border:1px solid var(--muted);border-right:none;font-family:var(--mono);font-size:12px;outline:none;cursor:pointer;">
+          <option value="http://">http://</option>
+          <option value="https://">https://</option>
+        </select>
         <input type="text" id="login-url" placeholder="your-api-host.com" value="localhost:3000" />
       </div>
     </div>
@@ -683,14 +686,15 @@ let pendingDeletePath = '';
 async function doLogin() {
   const user = document.getElementById('login-user').value.trim();
   const pass = document.getElementById('login-pass').value;
-  const host = document.getElementById('login-url').value.trim().replace(/\/+$/, '');
+  const proto = document.getElementById('login-proto').value;
+  const host  = document.getElementById('login-url').value.trim().replace(/\/+$/, '');
 
   if (!user || !pass || !host) {
     showLoginError('Please fill in all fields.');
     return;
   }
 
-  API_BASE    = `http://${host}`;
+  API_BASE    = `${proto}${host}`;
   AUTH_HEADER = 'Basic ' + btoa(`${user}:${pass}`);
   USERNAME    = user;
 
