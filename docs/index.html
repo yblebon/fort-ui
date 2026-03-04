@@ -155,7 +155,9 @@
       background: rgba(239,68,68,0.08);
       border-left: 3px solid var(--danger);
       color: var(--danger);
-      font-size: 12px;
+      font-size: 11px;
+      white-space: pre-line;
+      line-height: 1.8;
       display: none;
     }
 
@@ -682,6 +684,18 @@ let USERNAME    = '';
 let currentPath = '';
 let pendingDeletePath = '';
 
+// auth.ts decodes with atob() which is Latin-1.
+// We must match that exactly — do NOT UTF-8 encode first.
+// Reject non-Latin-1 chars early with a clear message instead.
+function utfBase64(str) {
+  for (let i = 0; i < str.length; i++) {
+    if (str.charCodeAt(i) > 255) {
+      throw new Error('Username and password must contain only standard (Latin-1) characters.');
+    }
+  }
+  return btoa(str);
+}
+
 // ── Auth ───────────────────────────────────────────────
 async function doLogin() {
   const user = document.getElementById('login-user').value.trim();
@@ -695,7 +709,7 @@ async function doLogin() {
   }
 
   API_BASE    = `${proto}${host}`;
-  AUTH_HEADER = 'Basic ' + btoa(`${user}:${pass}`);
+  AUTH_HEADER = 'Basic ' + utfBase64(`${user}:${pass}`);
   USERNAME    = user;
 
   const btn = document.getElementById('login-btn');
@@ -703,20 +717,36 @@ async function doLogin() {
   btn.textContent = 'Connecting…';
 
   try {
-    const res = await apiFetch('/protected');
+    const res = await apiFetch("/protected");
     if (res.ok) {
-      document.getElementById('login-screen').style.display = 'none';
-      document.getElementById('app').style.display = 'flex';
-      document.getElementById('topbar-user-label').textContent = user;
+      // Server returns { message: "Welcome, <username>! ..." }
+      // Parse and extract the verified username from the response rather than
+      // trusting the raw form input, to confirm the server accepted the identity.
+      let verifiedUser = user;
+      try {
+        const body = await res.json();
+        const match = body.message && body.message.match(/^Welcome, (.+)! This route/);
+        if (match) verifiedUser = match[1];
+      } catch { /* fall back to form input */ }
+      USERNAME = verifiedUser;
+      document.getElementById("login-screen").style.display = "none";
+      document.getElementById("app").style.display = "flex";
+      document.getElementById("topbar-user-label").textContent = verifiedUser;
       checkHealth();
-      loadFiles('');
+      loadFiles("");
+    } else if (res.status === 401) {
+      showLoginError("Wrong username or password.");
+      AUTH_HEADER = "";
     } else {
-      showLoginError('Authentication failed. Check your credentials.');
-      AUTH_HEADER = '';
+      showLoginError("Server returned " + res.status + ". Check the API URL.");
+      AUTH_HEADER = "";
     }
   } catch (e) {
-    showLoginError('Could not reach the server. Check the API URL.');
-    AUTH_HEADER = '';
+    const msg = e instanceof TypeError
+      ? "Network error u2014 could not reach " + API_BASE + ".\n\nPossible fixes:\nu2022 Confirm the API server is running: curl " + API_BASE + "/\nu2022 Open this HTML as file:// instead of via a local server\nu2022 Or serve this file from the same port as the API"
+      : "Error: " + e.message;
+    showLoginError(msg);
+    AUTH_HEADER = "";
   } finally {
     btn.disabled = false;
     btn.textContent = 'Connect →';
@@ -796,12 +826,19 @@ async function loadFiles(path) {
   body.innerHTML = '<div class="loading-row"><span class="spinner"></span> Loading…</div>';
 
   try {
-    const res  = await apiFetch(`/repo/list/${path}`);
-    if (!res.ok) throw new Error('Failed to list files');
+    const res = await apiFetch(`/repo/list/${path}`);
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const errBody = await res.json();
+        detail = errBody.error || errBody.message || JSON.stringify(errBody);
+      } catch { /* response wasn't JSON */ }
+      throw new Error(detail);
+    }
     const data = await res.json();
     renderFileList(data);
   } catch (e) {
-    body.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-msg">${e.message}</div></div>`;
+    body.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-msg" style="color:var(--danger);margin-bottom:8px">Server error</div><div class="empty-msg" style="font-size:11px;word-break:break-all;max-width:480px;margin:0 auto">${e.message}</div></div>`;
   }
 }
 
@@ -837,22 +874,27 @@ function renderFileList(items) {
   const sorted = [...dirs, ...files];
 
   body.innerHTML = sorted.map(item => {
-    const isDir  = item.type === 'dir';
-    const icon   = isDir ? '📁' : fileIcon(item.name);
+    const isDir     = item.type === 'dir';
+    const icon      = isDir ? '📁' : fileIcon(item.name);
     const typeLabel = isDir ? 'Directory' : (item.name.split('.').pop()?.toUpperCase() || 'File');
-    const path   = item.path || item.name;
+
+    // item.path from GitHub already contains GITHUB_ROOT_DIR as a prefix.
+    // Passing it back to the API would cause getFullPath() to double-prefix it
+    // (e.g. "data/reports" becomes "data/data/reports") -> 404 -> 500.
+    // Build the API path from currentPath + item.name so it stays relative.
+    const apiPath = currentPath ? `${currentPath}/${item.name}` : item.name;
 
     const actions = isDir
       ? `<div class="file-actions">
-           <div class="icon-btn" title="Open" onclick="event.stopPropagation();loadFiles('${path}')">→</div>
+           <div class="icon-btn" title="Open" onclick="event.stopPropagation();loadFiles('${apiPath}')">→</div>
          </div>`
       : `<div class="file-actions">
-           <div class="icon-btn" title="Download" onclick="event.stopPropagation();doDownload('${path}','${item.name}')">⬇</div>
-           <div class="icon-btn danger" title="Delete" onclick="event.stopPropagation();openDeleteModal('${path}')">✕</div>
+           <div class="icon-btn" title="Download" onclick="event.stopPropagation();doDownload('${apiPath}','${item.name}')">⬇</div>
+           <div class="icon-btn danger" title="Delete" onclick="event.stopPropagation();openDeleteModal('${apiPath}')">✕</div>
          </div>`;
 
     return `
-      <div class="file-row" onclick="${isDir ? `loadFiles('${path}')` : ''}">
+      <div class="file-row" onclick="${isDir ? `loadFiles('${apiPath}')` : ''}">
         <div class="file-name"><span class="file-icon">${icon}</span><span>${item.name}</span></div>
         <div class="file-type">${typeLabel}</div>
         ${actions}
