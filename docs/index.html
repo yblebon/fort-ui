@@ -539,6 +539,67 @@
       font-size: 12px;
     }
 
+    /* ── AUDIT TABLE ── */
+    .audit-table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+    }
+    .audit-table {
+      width: 100%; border-collapse: collapse;
+      font-size: 12px;
+    }
+    .audit-table th {
+      padding: 9px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      font-size: 10px; text-transform: uppercase;
+      letter-spacing: 1.5px; color: var(--dim);
+      text-align: left; white-space: nowrap;
+      position: sticky; top: 0;
+    }
+    .audit-table td {
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text); vertical-align: middle;
+      white-space: nowrap;
+    }
+    .audit-table tr:last-child td { border-bottom: none; }
+    .audit-table tr:hover td { background: rgba(255,255,255,0.02); }
+    .audit-table td.ts   { color: var(--dim); font-size: 11px; }
+    .audit-table td.path { color: var(--accent2); font-family: var(--mono); max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+    .audit-table td.ua   { color: var(--dim); font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+    .audit-badge {
+      display: inline-block; padding: 2px 7px;
+      font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px;
+    }
+    .audit-badge.ok  { background: rgba(34,197,94,0.12);  color: var(--success); }
+    .audit-badge.err { background: rgba(239,68,68,0.12);  color: var(--danger); }
+    .audit-badge.GET    { background: rgba(59,130,246,0.12); color: var(--accent2); }
+    .audit-badge.POST   { background: rgba(232,168,56,0.12); color: var(--accent); }
+    .audit-badge.DELETE { background: rgba(239,68,68,0.12);  color: var(--danger); }
+
+    /* ── CHANGE PASSWORD ── */
+    .security-card {
+      max-width: 460px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--accent);
+      padding: 32px;
+    }
+    .strength-bar {
+      height: 3px; background: var(--muted);
+      margin-top: 6px; position: relative;
+    }
+    .strength-fill {
+      height: 100%; width: 0%;
+      transition: width 0.3s, background 0.3s;
+    }
+    .strength-label {
+      font-size: 10px; color: var(--dim);
+      margin-top: 5px; min-height: 14px;
+    }
+
     /* ── ANIMATIONS ── */
     @keyframes fadeIn   { from { opacity: 0 } to { opacity: 1 } }
     @keyframes slideIn  { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
@@ -609,6 +670,13 @@
       <div class="nav-item" data-panel="upload" onclick="switchPanel('upload')">
         <span class="nav-icon">⬆︎</span> Upload File
       </div>
+      <div class="sidebar-section">Admin</div>
+      <div class="nav-item" data-panel="audit" onclick="switchPanel('audit')">
+        <span class="nav-icon">🔍</span> Audit Log
+      </div>
+      <div class="nav-item" data-panel="security" onclick="switchPanel('security')">
+        <span class="nav-icon">🔑</span> Change Password
+      </div>
     </div>
 
     <!-- Content -->
@@ -667,6 +735,49 @@
         <div class="action-bar">
           <button class="btn-accent" id="upload-btn" onclick="doUpload()">Upload File</button>
           <button class="btn-ghost" onclick="switchPanel('browse')">Cancel</button>
+        </div>
+      </div>
+
+
+      <!-- ── Audit Log Panel ── -->
+      <div class="panel" id="panel-audit">
+        <div class="panel-header">
+          <div class="panel-title">Audit Log</div>
+          <div class="panel-desc">All actions performed via this interface</div>
+        </div>
+        <div class="action-bar">
+          <button class="btn-ghost" onclick="loadAuditLog()">↺ Refresh</button>
+        </div>
+        <div id="audit-body">
+          <div class="loading-row"><span class="spinner"></span></div>
+        </div>
+      </div>
+
+      <!-- ── Change Password Panel ── -->
+      <div class="panel" id="panel-security">
+        <div class="panel-header">
+          <div class="panel-title">Change Password</div>
+          <div class="panel-desc">Updates the in-memory hash — takes effect immediately</div>
+        </div>
+        <div class="security-card">
+          <div class="form-row">
+            <label>Current Password</label>
+            <input type="password" id="cp-current" placeholder="••••••••" autocomplete="current-password" />
+          </div>
+          <div class="form-row">
+            <label>New Password <span style="color:var(--dim)">(min 8 chars)</span></label>
+            <input type="password" id="cp-new" placeholder="••••••••" autocomplete="new-password" oninput="checkStrength(this.value)" />
+            <div class="strength-bar"><div class="strength-fill" id="strength-fill"></div></div>
+            <div class="strength-label" id="strength-label"></div>
+          </div>
+          <div class="form-row">
+            <label>Confirm New Password</label>
+            <input type="password" id="cp-confirm" placeholder="••••••••" autocomplete="new-password" />
+          </div>
+          <div class="action-bar" style="margin-top:24px">
+            <button class="btn-accent" id="cp-btn" onclick="doChangePassword()">Change Password</button>
+            <button class="btn-ghost" onclick="switchPanel('browse')">Cancel</button>
+          </div>
         </div>
       </div>
 
@@ -888,6 +999,7 @@ function switchPanel(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
   document.querySelector(`[data-panel="${name}"]`).classList.add('active');
+  if (name === 'audit') loadAuditLog();
 }
 
 // ── File Browser ───────────────────────────────────────
@@ -1092,6 +1204,123 @@ function formatBytes(b) {
   if (b < 1024) return b + ' B';
   if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
   return (b/1048576).toFixed(1) + ' MB';
+}
+
+function formatTS(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+
+// ── Audit Log ──────────────────────────────────────────
+async function loadAuditLog() {
+  const body = document.getElementById('audit-body');
+  body.innerHTML = '<div class="loading-row"><span class="spinner"></span> Loading…</div>';
+  try {
+    const res = await apiFetch('/audit');
+    if (res.status === 401) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const entries = await res.json();
+    renderAuditLog(entries);
+  } catch (e) {
+    body.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-msg" style="color:var(--danger)">${e.message}</div></div>`;
+  }
+}
+
+function renderAuditLog(entries) {
+  const body = document.getElementById('audit-body');
+  if (!entries || entries.length === 0) {
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">📋</div><div class="empty-msg">No audit entries yet</div></div>';
+    return;
+  }
+  const rows = entries.map(e => {
+    const statusClass = (e.status >= 200 && e.status < 300) ? 'ok' : 'err';
+    const methodClass = ['GET','POST','DELETE'].includes(e.method) ? e.method : '';
+    return `<tr>
+      <td class="ts">${formatTS(e.ts)}</td>
+      <td><strong>${e.user ?? '—'}</strong></td>
+      <td><span class="audit-badge ${methodClass}">${e.method}</span></td>
+      <td class="path" title="${e.path}">${e.path}</td>
+      <td><span class="audit-badge ${statusClass}">${e.status ?? '—'}</span></td>
+      <td>${e.ip ?? '—'}</td>
+      <td class="ua" title="${e.ua ?? ''}">${e.ua ?? '—'}</td>
+    </tr>`;
+  }).join('');
+
+  body.innerHTML = `
+    <div class="audit-table-wrap">
+      <table class="audit-table">
+        <thead><tr>
+          <th>Time</th><th>User</th><th>Method</th><th>Path</th><th>Status</th><th>IP</th><th>Client</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+
+
+// ── Change Password ────────────────────────────────────
+function checkStrength(val) {
+  const fill  = document.getElementById('strength-fill');
+  const label = document.getElementById('strength-label');
+  if (!val) { fill.style.width = '0%'; label.textContent = ''; return; }
+
+  let score = 0;
+  if (val.length >= 8)  score++;
+  if (val.length >= 12) score++;
+  if (/[A-Z]/.test(val)) score++;
+  if (/[0-9]/.test(val)) score++;
+  if (/[^A-Za-z0-9]/.test(val)) score++;
+
+  const levels = [
+    { pct:'20%', color:'var(--danger)',  text:'Very weak' },
+    { pct:'40%', color:'#f97316',        text:'Weak' },
+    { pct:'60%', color:'var(--accent)',  text:'Fair' },
+    { pct:'80%', color:'#84cc16',        text:'Strong' },
+    { pct:'100%',color:'var(--success)', text:'Very strong' },
+  ];
+  const lvl = levels[Math.min(score, 4)];
+  fill.style.width      = lvl.pct;
+  fill.style.background = lvl.color;
+  label.textContent     = lvl.text;
+  label.style.color     = lvl.color;
+}
+
+async function doChangePassword() {
+  const current = document.getElementById('cp-current').value;
+  const next    = document.getElementById('cp-new').value;
+  const confirm = document.getElementById('cp-confirm').value;
+
+  if (!current) { toast('Enter your current password', 'error'); return; }
+  if (next.length < 8) { toast('New password must be at least 8 characters', 'error'); return; }
+  if (next !== confirm) { toast('Passwords do not match', 'error'); return; }
+
+  const btn = document.getElementById('cp-btn');
+  btn.disabled = true; btn.textContent = 'Changing…';
+
+  try {
+    const res = await apiFetch('/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword: current, newPassword: next }),
+    });
+    if (res.status === 401) { toast('Current password is incorrect', 'error'); return; }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Password change failed');
+    }
+    toast('Password changed successfully', 'success');
+    // Clear form
+    document.getElementById('cp-current').value = '';
+    document.getElementById('cp-new').value     = '';
+    document.getElementById('cp-confirm').value = '';
+    document.getElementById('strength-fill').style.width = '0%';
+    document.getElementById('strength-label').textContent = '';
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Change Password';
+  }
 }
 </script>
 </body>
