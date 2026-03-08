@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' http://localhost:3000 https:; img-src 'self' data:; object-src 'none'; base-uri 'self';">
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Repo Vault</title>
@@ -1216,7 +1217,7 @@ async function loadAuditLog() {
   const body = document.getElementById('audit-body');
   body.innerHTML = '<div class="loading-row"><span class="spinner"></span> Loading…</div>';
   try {
-    const res = await apiFetch('/audit');
+    const res = await apiFetch('/admin/audit');
     if (res.status === 401) return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const entries = await res.json();
