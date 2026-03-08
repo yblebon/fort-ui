@@ -633,8 +633,15 @@
           <option value="http://">http://</option>
           <option value="https://">https://</option>
         </select>
-        <input type="text" id="login-url" placeholder="your-api-host.com" value="localhost:3000" />
+        <input type="text" id="login-url" placeholder="your-api-host.com" value="localhost:3000"
+               list="server-history" autocomplete="off" />
+        <datalist id="server-history"></datalist>
+        <button type="button" id="clear-history-btn" onclick="clearServerHistory()"
+                title="Clear server history"
+                style="padding:0 10px;background:var(--muted);color:var(--text-dim);border:1px solid var(--muted);border-left:none;font-size:14px;cursor:pointer;line-height:1;outline:none;transition:color .15s;"
+                onmouseenter="this.style.color='var(--danger)'" onmouseleave="this.style.color='var(--text-dim)'">✕</button>
       </div>
+      <div id="server-history-list" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;"></div>
     </div>
 
     <button class="btn-primary" id="login-btn" onclick="doLogin()">Connect →</button>
@@ -805,6 +812,64 @@
 
 <script>
 // ── State ──────────────────────────────────────────────
+// ── Server history (localStorage) ─────────────────────────────────────────
+// Stores up to 10 recently used server URLs. Token is never persisted.
+const STORAGE_KEY = 'repovault:servers';
+const MAX_HISTORY = 10;
+
+function loadServerHistory() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function saveServerHistory(list) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
+  catch { /* storage full / private mode */ }
+}
+
+function pushServer(fullUrl) {
+  // fullUrl is proto + host, e.g. "https://api.example.com"
+  const list = loadServerHistory().filter(u => u !== fullUrl);
+  list.unshift(fullUrl);
+  saveServerHistory(list.slice(0, MAX_HISTORY));
+}
+
+function clearServerHistory() {
+  saveServerHistory([]);
+  renderServerHistory();
+}
+
+function fillServer(fullUrl) {
+  // Split proto and host back into the two inputs
+  const proto = fullUrl.startsWith('https://') ? 'https://' : 'http://';
+  const host  = fullUrl.replace(/^https?:\/\//, '');
+  document.getElementById('login-proto').value = proto;
+  document.getElementById('login-url').value   = host;
+}
+
+function renderServerHistory() {
+  const list      = loadServerHistory();
+  const datalist  = document.getElementById('server-history');
+  const container = document.getElementById('server-history-list');
+
+  // Populate <datalist> for native browser autocomplete
+  datalist.innerHTML = list.map(u => `<option value="${u.replace(/^https?:\/\//, '')}"></option>`).join('');
+
+  // Render clickable pills
+  if (list.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+  container.innerHTML = list.map(u => `
+    <span onclick="fillServer('${u}')"
+          style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;background:var(--muted);
+                 border:1px solid rgba(255,255,255,.08);border-radius:3px;font-size:11px;font-family:var(--mono);
+                 color:var(--text-dim);cursor:pointer;transition:color .15s;"
+          onmouseenter="this.style.color='var(--accent)'" onmouseleave="this.style.color='var(--text-dim)'">
+      ${u}
+    </span>`).join('');
+}
+
 let API_BASE    = '';
 let AUTH_TOKEN  = '';       // JWT Bearer token (in-memory only, never persisted)
 let TOKEN_EXP   = 0;        // Unix ms timestamp of expiry
@@ -859,6 +924,7 @@ async function doLogin() {
   catch (e) { showLoginError(e.message); return; }
 
   API_BASE = `${proto}${host}`;
+  pushServer(API_BASE);
 
   const btn = document.getElementById('login-btn');
   btn.disabled = true; btn.textContent = 'Connecting…';
@@ -1323,6 +1389,7 @@ async function doChangePassword() {
     btn.disabled = false; btn.textContent = 'Change Password';
   }
 }
+renderServerHistory();
 </script>
 </body>
 </html>
